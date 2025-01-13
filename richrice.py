@@ -1,6 +1,9 @@
 import requests
 import time
 import random
+from threading import Thread
+from queue import Queue
+import threading
 
 def freerice_login(username, password):
     # Create a session to preserve cookies and other session data across requests
@@ -29,47 +32,42 @@ def freerice_login(username, password):
         # ...
     }
 
-    # Send the POST request with JSON data and handle rate limiting
-    retry_delay = 1  # Start with 1 second delay
+    response = session.post(login_url, json=payload, headers=headers)
     
-    while True:  # Unlimited retries
-        try:
-            response = session.post(login_url, json=payload, headers=headers)
+
+    base_delay = 1  # Start with 1 second delay
+    retry_count = 0
+    while True:
+        if response.status_code == 200:
+            response_data = response.json()
+            print("Login request succeeded.")
+            print("Response JSON:", response_data)
             
-            # Check if we hit rate limit
-            if response.status_code == 429:
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-                continue
-                    
-            if response.status_code == 200:
-                response_data = response.json()
-                print("Login request succeeded.")
-                print("Response JSON:", response_data)
-                
-                token = response_data.get("token")
-                user_uuid = response_data.get("uuid")   # <- The UUID from response
-                
-                # Optionally extract userData or other fields as well
-                user_data = response_data.get("userData", {})
-                print(f"Logged in as: {user_data.get('username')}")
-                
-                # Now return all three
-                return session, user_uuid, token
-            else:
-                print("Login request failed.")
-                print("Status code:", response.status_code)
-                print("Response text:", response.text)
-                
-                time.sleep(retry_delay)
-                retry_delay *= 2
-                continue
-                
-        except requests.exceptions.RequestException as e:
-            print(f"Request failed: {e}")
-            time.sleep(retry_delay)
-            retry_delay *= 2
-            continue
+            token = response_data.get("token")
+            user_uuid = response_data.get("uuid")   # <- The UUID from response
+            
+            # Optionally extract userData or other fields as well
+            user_data = response_data.get("userData", {})
+            print(f"Logged in as: {user_data.get('username')}")
+            
+            # Now return all three
+            return session, user_uuid, token
+        else:
+            retry_count += 1
+            delay = base_delay * (2 ** (retry_count - 1))  # Exponential backoff
+            print(f"Login request failed. Attempt {retry_count}")
+            print("Status code:", response.status_code)
+            print("Response text:", response.text)
+            print(f"Retrying in {delay} seconds...")
+            time.sleep(delay)
+            
+            # Retry the request
+            response = session.post(login_url, json=payload, headers=headers)
+    
+
+    return None, None, None
+            
+
 def simulate_answer(session, token, submit_response=None):
     game_url = "https://engine.freerice.com/games/232b86f5-d908-4327-9a33-dec59f9f661f"
     headers = {
@@ -140,29 +138,30 @@ def answer_multiple(n, freerice_session, token):
     successful_requests = 0
 
     for i in range(1, n + 1):
-        previous_response = simulate_answer(freerice_session, token, previous_response)
-        if previous_response is None:
-            print(f"\nRate limited at question number {i}")
-            retry_count = 0
-            retry_delay = 1  # Start with 1 second delay
-            while retry_count < 3:  # Limit retries
-                time.sleep(retry_delay)
-                print(f"Retrying after {retry_delay}s delay...")
-                previous_response = simulate_answer(freerice_session, token, None)
-                if previous_response is None:
-                    print("Request failed during retry")
-                    retry_delay *= 2  # Double the delay for next retry
-                    retry_count += 1
-                    continue
-                if previous_response.status_code == 200:
+        retry_delay = 1
+        while True:
+            try:
+                previous_response = simulate_answer(freerice_session, token, previous_response)
+                request_count += 1
+                
+                if previous_response is not None and previous_response.status_code == 200:
+                    successful_requests += 1
                     break
-                print(f"Failed to submit answer. Status code: {previous_response.status_code}")
-                retry_delay *= 2  # Double the delay for next retry
-                retry_count += 1
+                    
+                print(f"\nRequest failed at question {i}")
+                if previous_response is not None:
+                    print(f"Status code: {previous_response.status_code}")
+                
+                print(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+                previous_response = None
+            except Exception as e:
+                print(f"Error occurred: {str(e)}")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+                previous_response = None
 
-        request_count += 1
-        if previous_response.status_code == 200:
-            successful_requests += 1
         if i % 100 == 0:
             total_elapsed = time.time() - start_time
             if total_elapsed > 0:
@@ -177,9 +176,6 @@ def answer_multiple(n, freerice_session, token):
                     f"Requests/hr: {requests_per_hour:.2f}"
                 )
 
-        
-
-    
     # Final statistics print after the loop completes
     total_time = time.time() - start_time
     if total_time > 0:
@@ -195,6 +191,31 @@ def answer_multiple(n, freerice_session, token):
         print("\nTotal time is zero, cannot calculate rates.")
 
     return successful_requests
+
+# Add this new class to track thread statistics
+class ThreadStats:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.total_successful = 0
+        self.start_time = time.time()
+        
+    def increment_success(self, count=1):
+        with self.lock:
+            self.total_successful += count
+            
+    def get_stats(self):
+        total_time = time.time() - self.start_time
+        if total_time > 0:
+            requests_per_second = self.total_successful / total_time
+            requests_per_minute = requests_per_second * 60
+            requests_per_hour = requests_per_second * 3600
+            return {
+                'successful': self.total_successful,
+                'rps': requests_per_second,
+                'rpm': requests_per_minute,
+                'rph': requests_per_hour
+            }
+        return None
 
 if __name__ == "__main__":
 
@@ -216,18 +237,34 @@ if __name__ == "__main__":
     threads = []
     requests_per_thread = args.num_requests // args.threads
     
-    def thread_worker():
-        # Each thread does its own login
+    # Create shared statistics object
+    stats = ThreadStats()
+    
+    def thread_worker(thread_id):
+        print(f"Thread {thread_id} starting...")
         session, uuid, token = freerice_login(args.username, args.password)
         if session and token:
-            answer_multiple(requests_per_thread, session, token)
+            successful = answer_multiple(requests_per_thread, session, token)
+            stats.increment_success(successful)
+            print(f"Thread {thread_id} completed with {successful} successful requests")
+        else:
+            print(f"Thread {thread_id} failed to login")
     
     # Create and start threads
     for i in range(args.threads):
-        thread = Thread(target=thread_worker)
+        thread = Thread(target=thread_worker, args=(i,))
         threads.append(thread)
         thread.start()
     
     # Wait for all threads to complete
     for thread in threads:
         thread.join()
+    
+    # Print final statistics
+    final_stats = stats.get_stats()
+    if final_stats:
+        print("\nFinal Combined Statistics:")
+        print(f"Total Successful Requests: {final_stats['successful']}")
+        print(f"Requests/sec: {final_stats['rps']:.2f}")
+        print(f"Requests/min: {final_stats['rpm']:.2f}")
+        print(f"Requests/hr: {final_stats['rph']:.2f}")
