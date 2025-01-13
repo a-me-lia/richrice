@@ -1,5 +1,6 @@
 import requests
 import time
+import random
 
 def freerice_login(username, password):
     # Create a session to preserve cookies and other session data across requests
@@ -28,29 +29,47 @@ def freerice_login(username, password):
         # ...
     }
 
-    # Send the POST request with JSON data
-    response = session.post(login_url, json=payload, headers=headers)
-
-    if response.status_code == 200:
-        response_data = response.json()
-        print("Login request succeeded.")
-        print("Response JSON:", response_data)
-        
-        token = response_data.get("token")
-        user_uuid = response_data.get("uuid")   # <- The UUID from response
-        
-        # Optionally extract userData or other fields as well
-        user_data = response_data.get("userData", {})
-        print(f"Logged in as: {user_data.get('username')}")
-        
-        # Now return all three
-        return session, user_uuid, token
-    else:
-        print("Login request failed.")
-        print("Status code:", response.status_code)
-        print("Response text:", response.text)
-        return None, None, None
+    # Send the POST request with JSON data and handle rate limiting
+    retry_delay = 1  # Start with 1 second delay
     
+    while True:  # Unlimited retries
+        try:
+            response = session.post(login_url, json=payload, headers=headers)
+            
+            # Check if we hit rate limit
+            if response.status_code == 429:
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+                continue
+                    
+            if response.status_code == 200:
+                response_data = response.json()
+                print("Login request succeeded.")
+                print("Response JSON:", response_data)
+                
+                token = response_data.get("token")
+                user_uuid = response_data.get("uuid")   # <- The UUID from response
+                
+                # Optionally extract userData or other fields as well
+                user_data = response_data.get("userData", {})
+                print(f"Logged in as: {user_data.get('username')}")
+                
+                # Now return all three
+                return session, user_uuid, token
+            else:
+                print("Login request failed.")
+                print("Status code:", response.status_code)
+                print("Response text:", response.text)
+                
+                time.sleep(retry_delay)
+                retry_delay *= 2
+                continue
+                
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            time.sleep(retry_delay)
+            retry_delay *= 2
+            continue
 def simulate_answer(session, token, submit_response=None):
     game_url = "https://engine.freerice.com/games/232b86f5-d908-4327-9a33-dec59f9f661f"
     headers = {
@@ -78,7 +97,7 @@ def simulate_answer(session, token, submit_response=None):
         response = session.get(game_url, headers=headers)
         if response.status_code != 200:
             print("Failed to fetch game data.")
-            return
+            return None
         game_data = response.json()
     else:
         game_data = submit_response.json()
@@ -90,7 +109,7 @@ def simulate_answer(session, token, submit_response=None):
     match = re.match(r'(\d+)\s*x\s*(\d+)', question_text)
     if not match:
         print("Failed to parse question.")
-        return
+        return None
     num1, num2 = int(match.group(1)), int(match.group(2))
     answer = num1 * num2
 
@@ -99,7 +118,7 @@ def simulate_answer(session, token, submit_response=None):
     correct_option = next((opt for opt in options if int(opt['text']) == answer), None)
     if not correct_option:
         print("Correct option not found.")
-        return
+        return None
     answer_id = correct_option['id']
 
     # Submit the answer using PATCH method
@@ -109,6 +128,7 @@ def simulate_answer(session, token, submit_response=None):
     submit_response = session.patch(submit_url, json=payload, headers=headers)
     if submit_response.status_code != 200:
         print(f"Failed to submit answer. Status code: {submit_response.status_code}")
+        return None
 
     return submit_response
 
@@ -121,11 +141,28 @@ def answer_multiple(n, freerice_session, token):
 
     for i in range(1, n + 1):
         previous_response = simulate_answer(freerice_session, token, previous_response)
+        if previous_response is None:
+            print(f"\nRate limited at question number {i}")
+            retry_count = 0
+            retry_delay = 1  # Start with 1 second delay
+            while retry_count < 3:  # Limit retries
+                time.sleep(retry_delay)
+                print(f"Retrying after {retry_delay}s delay...")
+                previous_response = simulate_answer(freerice_session, token, None)
+                if previous_response is None:
+                    print("Request failed during retry")
+                    retry_delay *= 2  # Double the delay for next retry
+                    retry_count += 1
+                    continue
+                if previous_response.status_code == 200:
+                    break
+                print(f"Failed to submit answer. Status code: {previous_response.status_code}")
+                retry_delay *= 2  # Double the delay for next retry
+                retry_count += 1
+
         request_count += 1
-        
         if previous_response.status_code == 200:
             successful_requests += 1
-
         if i % 100 == 0:
             total_elapsed = time.time() - start_time
             if total_elapsed > 0:
@@ -140,9 +177,8 @@ def answer_multiple(n, freerice_session, token):
                     f"Requests/hr: {requests_per_hour:.2f}"
                 )
 
-        if previous_response.status_code != 200:
-            print(f"\nRate limited at question number {i}")
-            time.sleep(10)
+        
+
     
     # Final statistics print after the loop completes
     total_time = time.time() - start_time
@@ -157,6 +193,8 @@ def answer_multiple(n, freerice_session, token):
         )
     else:
         print("\nTotal time is zero, cannot calculate rates.")
+
+    return successful_requests
 
 if __name__ == "__main__":
 
