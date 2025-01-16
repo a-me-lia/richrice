@@ -4,6 +4,7 @@ import random
 from threading import Thread
 from queue import Queue
 import threading
+import csv
 
 def freerice_login(username, password):
     # Create a session to preserve cookies and other session data across requests
@@ -68,8 +69,7 @@ def freerice_login(username, password):
     return None, None, None
             
 
-def simulate_answer(session, token, submit_response=None):
-    game_url = "https://engine.freerice.com/games/232b86f5-d908-4327-9a33-dec59f9f661f"
+def simulate_answer(session, token, game_url, submit_response=None):
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -91,7 +91,6 @@ def simulate_answer(session, token, submit_response=None):
     }
     if not submit_response:
         # Fetch the current game data from the specified URL
-
         response = session.get(game_url, headers=headers)
         if response.status_code != 200:
             print("Failed to fetch game data.")
@@ -131,7 +130,7 @@ def simulate_answer(session, token, submit_response=None):
     return submit_response
 
 
-def answer_multiple(n, freerice_session, token):
+def answer_multiple(n, freerice_session, token, game_url):
     previous_response = None
     start_time = time.time()
     request_count = 0
@@ -141,7 +140,7 @@ def answer_multiple(n, freerice_session, token):
         retry_delay = 1
         while True:
             try:
-                previous_response = simulate_answer(freerice_session, token, previous_response)
+                previous_response = simulate_answer(freerice_session, token, game_url, previous_response)
                 request_count += 1
                 
                 if previous_response is not None and previous_response.status_code == 200:
@@ -218,43 +217,39 @@ class ThreadStats:
         return None
 
 if __name__ == "__main__":
-
     import re
     import argparse
 
     parser = argparse.ArgumentParser(description='Run FreeRice automation')
-    parser.add_argument('-u', '--username', default='mikoyae', help='FreeRice username')
-    parser.add_argument('-p', '--password', default='lovemarchseventh', help='FreeRice password')
-    parser.add_argument('-n', '--num-requests', type=int, default=1000, help='Number of requests to make')
-    # Add thread count argument
-    parser.add_argument('-t', '--threads', type=int, default=1, help='Number of threads to use')
+    parser.add_argument('-n', '--num-requests', type=int, default=1000, help='Number of requests per account')
+    parser.add_argument('-f', '--file', default='accounts.csv', help='CSV file with account details')
     args = parser.parse_args()
 
-
-    
-    # Split requests across threads
-    from threading import Thread
-    threads = []
-    requests_per_thread = args.num_requests // args.threads
-    
     # Create shared statistics object
     stats = ThreadStats()
+    threads = []
     
-    def thread_worker(thread_id):
-        print(f"Thread {thread_id} starting...")
-        session, uuid, token = freerice_login(args.username, args.password)
+    def thread_worker(username, password, game_url):
+        print(f"Starting worker for {username}...")
+        session, uuid, token = freerice_login(username, password)
         if session and token:
-            successful = answer_multiple(requests_per_thread, session, token)
+            successful = answer_multiple(args.num_requests, session, token, game_url)
             stats.increment_success(successful)
-            print(f"Thread {thread_id} completed with {successful} successful requests")
+            print(f"Account {username} completed with {successful} successful requests")
         else:
-            print(f"Thread {thread_id} failed to login")
+            print(f"Account {username} failed to login")
     
-    # Create and start threads
-    for i in range(args.threads):
-        thread = Thread(target=thread_worker, args=(i,))
-        threads.append(thread)
-        thread.start()
+    # Read accounts from CSV and spawn threads
+    with open(args.file, 'r') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            username = row['username']
+            password = row['password']
+            game_url = f"https://engine.freerice.com/games/{row['game_id']}"
+            
+            thread = Thread(target=thread_worker, args=(username, password, game_url))
+            threads.append(thread)
+            thread.start()
     
     # Wait for all threads to complete
     for thread in threads:
