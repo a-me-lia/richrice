@@ -156,21 +156,19 @@ class TelemetryClient:
 
             elapsed_time = current_time - self.start_time
 
-            current_rice = self.fetch_current_rice_total()
-            if current_rice is not None:
-                delta = current_rice - self.prev_rice_total
-                if delta < 0:
-                    # Handle possible reset or logout
-                    print("Rice total decreased or reset. Resetting telemetry.")
-                    self.prev_rice_total = current_rice
-                    self.start_time = current_time
-                    self.total_rice_gained = 0
-                    delta = 0
-                else:
-                    with self.lock:
-                        self.total_rice_gained += delta
+            fetch_rice = self.fetch_current_rice_total()
+            if fetch_rice == 0:
+                delta = 0
+            else:
+                delta = fetch_rice - self.prev_rice_total
 
-                self.prev_rice_total = current_rice
+            if fetch_rice is not None:
+
+                with self.lock:
+                    self.total_rice_gained += delta
+
+                if delta > 0:
+                    self.prev_rice_total = fetch_rice
 
                 # Calculate overall effective rates
                 with self.lock:
