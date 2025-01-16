@@ -223,6 +223,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run FreeRice automation')
     parser.add_argument('-n', '--num-requests', type=int, default=1000, help='Number of requests per account')
     parser.add_argument('-f', '--file', default='accounts.csv', help='CSV file with account details')
+
+    parser.add_argument('-l', '--line', type=int, help='Specific line number in CSV file to use (1-based index)')
+
     args = parser.parse_args()
 
     # Create shared statistics object
@@ -238,11 +241,16 @@ if __name__ == "__main__":
             print(f"Account {username} completed with {successful} successful requests")
         else:
             print(f"Account {username} failed to login")
-    
+
+
     # Read accounts from CSV and spawn threads
     with open(args.file, 'r') as csvfile:
         reader = csv.DictReader(csvfile)
-        for row in reader:
+        for i, row in enumerate(reader, 1):  # Start counting at 1 to match line numbers
+            # Skip rows unless it matches specified line number
+            if args.line and i != args.line:
+                continue
+                
             username = row['username']
             password = row['password']
             game_url = f"https://engine.freerice.com/games/{row['game_id']}"
@@ -250,7 +258,10 @@ if __name__ == "__main__":
             thread = Thread(target=thread_worker, args=(username, password, game_url))
             threads.append(thread)
             thread.start()
-    
+            
+            # If we processed the specified line, no need to continue
+            if args.line:
+                break
     # Wait for all threads to complete
     for thread in threads:
         thread.join()
